@@ -9,6 +9,7 @@ arch:
   - amd64
   - aarch64
   - armv7
+image: ghcr.io/v0l/battery-bridge-{arch}
 init: false
 # Auto-wire the Mosquitto broker add-on.
 services:
