@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - battery_bridge/**
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
       - .github/workflows/builder.yml
   workflow_dispatch:
 
