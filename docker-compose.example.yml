@@ -1,0 +1,42 @@
+# Standalone deployment (Home Assistant Container/Core — no Supervisor).
+#
+# 1. docker compose up -d
+# 2. In HA: Settings -> Devices & services -> Add integration -> MQTT
+#    broker = <this host>, port 1883, user/pass as below
+# 3. Batteries appear automatically under the MQTT integration.
+services:
+
+  # Skip this if you already run a broker that HA's MQTT integration uses.
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto:/mosquitto/config
+      - mosquitto-data:/mosquitto/data
+
+  battery-bridge:
+    image: ghcr.io/v0l/battery-bridge:latest
+    restart: unless-stopped
+    # host networking: reach a local broker + SocketCAN interfaces
+    network_mode: host
+    volumes:
+      # BLE via the host's BlueZ daemon (Anker / JK / Victron)
+      - /var/run/dbus:/var/run/dbus:ro
+    # serial BMS adapters (JK / Daly) — adjust or remove
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    environment:
+      MQTT_HOST: 127.0.0.1
+      MQTT_PORT: "1883"
+      MQTT_USERNAME: mqtt
+      MQTT_PASSWORD: change-me
+      # empty = bridge everything discovered; or e.g. "ble:AA:BB:CC:DD:EE:FF"
+      # DEVICES: ""
+      POLL_INTERVAL: "15"
+      BLE_SECS: "6"
+      RUST_LOG: info
+
+volumes:
+  mosquitto-data:

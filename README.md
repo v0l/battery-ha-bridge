@@ -34,6 +34,24 @@ This repo doubles as an add-on repository:
 
 See [`battery_bridge/DOCS.md`](battery_bridge/DOCS.md) for options.
 
+## Home Assistant Container / Core (docker)
+
+No Supervisor, no add-ons — run the bridge as a sibling container pointing at
+the same MQTT broker HA uses. See
+[`docker-compose.example.yml`](docker-compose.example.yml):
+
+```sh
+docker run -d --name battery-bridge --restart unless-stopped \
+  --network host \
+  -v /var/run/dbus:/var/run/dbus:ro \
+  -e MQTT_HOST=127.0.0.1 -e MQTT_USERNAME=mqtt -e MQTT_PASSWORD=... \
+  ghcr.io/v0l/battery-bridge:latest
+```
+
+Add `--device /dev/ttyUSB0` for serial BMSes. The MQTT integration must be
+configured in HA (Settings → Devices & services → Add integration → MQTT);
+entities then appear automatically.
+
 ## Standalone
 
 [battery-control] is pulled automatically as a cargo git dependency:
