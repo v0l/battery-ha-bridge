@@ -1,0 +1,32 @@
+name: Battery Control Bridge
+version: "0.1.0"
+slug: battery_bridge
+description: >-
+  Expose batteries, BMSes and power stations (Anker SOLIX, JK BMS, Daly BMS,
+  Victron, Pylontech CAN) to Home Assistant via MQTT Discovery.
+url: https://github.com/v0l/battery-ha-bridge
+arch:
+  - amd64
+  - aarch64
+  - armv7
+init: false
+# Auto-wire the Mosquitto broker add-on.
+services:
+  - mqtt:need
+# BLE (BlueZ over D-Bus), serial adapters, and SocketCAN.
+host_dbus: true
+host_network: true
+uart: true
+privileged:
+  - NET_ADMIN
+options:
+  devices: []
+  poll_interval: 15
+  ble_secs: 6
+  log_level: info
+schema:
+  devices:
+    - str
+  poll_interval: int(1,3600)
+  ble_secs: int(1,60)
+  log_level: list(trace|debug|info|warn|error)
