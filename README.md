@@ -36,13 +36,19 @@ See [`battery_bridge/DOCS.md`](battery_bridge/DOCS.md) for options.
 
 ## Standalone
 
-Requires [battery-control] checked out as a sibling directory:
+[battery-control] is pulled automatically as a cargo git dependency:
 
 ```sh
-git clone https://github.com/v0l/battery-control
 git clone https://github.com/v0l/battery-ha-bridge
 cd battery-ha-bridge
 cargo run --release -- --mqtt-host 192.168.1.10 --device c1000
+```
+
+To develop against a local checkout of the lib, add to `Cargo.toml`:
+
+```toml
+[patch."https://github.com/v0l/battery-control"]
+battery_control = { path = "../battery-control" }
 ```
 
 Empty `--device` bridges everything discovered. On Linux, add

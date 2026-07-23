@@ -14,9 +14,10 @@ default = []
 can = ["battery_control/can-socket"]
 
 [dependencies]
-# For local development this expects battery-control checked out as a sibling
-# directory; the add-on Dockerfile clones both repos side by side.
-battery_control = { path = "../battery-control", features = ["full"] }
+# Pinned to the default branch; for local development against a checkout use:
+#   [patch."https://github.com/v0l/battery-control"]
+#   battery_control = { path = "../battery-control" }
+battery_control = { git = "https://github.com/v0l/battery-control", features = ["full"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 rumqttc = "0.24"
 serde_json = "1"
