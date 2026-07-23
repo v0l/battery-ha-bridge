@@ -15,7 +15,7 @@ can = ["battery_control/can-socket"]
 
 [dependencies]
 # Pinned to an exact upstream commit; bump the rev to pull in lib updates.
-battery_control = { git = "https://github.com/v0l/battery-control", rev = "11eb7b2ca8410ad2217a8ab927fa5089ce028bd1", features = ["full"] }
+battery_control = { git = "https://github.com/v0l/battery-control", rev = "69011b66338ebfe1d7d68b6ba01f0a9871c7fbd9", features = ["full"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 rumqttc = "0.24"
 serde_json = "1"

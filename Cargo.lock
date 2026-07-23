@@ -60,8 +60,7 @@ dependencies = [
 [[package]]
 name = "anker_solix"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb09743c7dc7567f58a45c65f59d60ff17d660f6fc4d6ee70177b3f04cc8e21b"
+source = "git+https://github.com/v0l/anker-rs.git?rev=b7b110946f8d860367f92a162b6e8f33c828248b#b7b110946f8d860367f92a162b6e8f33c828248b"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
@@ -202,12 +201,13 @@ dependencies = [
 [[package]]
 name = "battery_control"
 version = "0.1.0"
-source = "git+https://github.com/v0l/battery-control?rev=11eb7b2ca8410ad2217a8ab927fa5089ce028bd1#11eb7b2ca8410ad2217a8ab927fa5089ce028bd1"
+source = "git+https://github.com/v0l/battery-control?rev=69011b66338ebfe1d7d68b6ba01f0a9871c7fbd9#69011b66338ebfe1d7d68b6ba01f0a9871c7fbd9"
 dependencies = [
  "anker_solix",
  "async-trait",
  "bitflags 2.13.1",
  "dalybms",
+ "futures-core",
  "futures-util",
  "jk_bms",
  "log",
@@ -1350,9 +1350,9 @@ dependencies = [
 
 [[package]]
 name = "jk_bms"
-version = "0.3.0"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33f0b3df5a365adfb46519a827f34d64e5194530f18eb5f24b92ed82189d017d"
+checksum = "0b222ca33368d1843a7ec2909265a1538175f8db088db2f93accebb789d2ea9e"
 dependencies = [
  "async-trait",
  "btleplug",
@@ -1362,7 +1362,6 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "socketcan",
  "thiserror 2.0.19",
  "tokio",
  "tokio-serial",
@@ -2250,18 +2249,15 @@ checksum = "ea24328be148eea05f36bc3991b1c174c586853e04d1480b92429b2df6aea865"
 dependencies = [
  "bitflags 2.13.1",
  "embedded-can",
- "futures",
  "hex",
  "itertools 0.13.0",
  "libc",
  "log",
- "mio",
  "nb",
  "neli",
  "nix 0.29.0",
  "socket2 0.5.10",
  "thiserror 2.0.19",
- "tokio",
 ]
 
 [[package]]

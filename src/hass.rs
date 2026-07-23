@@ -4,21 +4,26 @@
 //! `<base>/<slug>/state`; every entity is a discovery config under
 //! `<prefix>/<component>/bc_<slug>/<key>/config` with a `value_template`
 //! into that document.
+//!
+//! Built against `battery_control`'s id-addressed model: sensors, switches,
+//! ports, cells and settings are free-form collections keyed by id.
 
-use battery_control::{BatteryStatus, Capabilities, DeviceInfo};
+use battery_control::{
+    BatteryStatus, Capabilities, DeviceInfo, SettingKind, SettingValue, Unit,
+};
 use serde_json::{Map, Value, json};
 
 /// Round to 3 decimals to keep MQTT payloads stable/readable.
-fn r3(v: f32) -> Value {
-    json!(((v as f64) * 1000.0).round() / 1000.0)
+fn r3(v: f64) -> Value {
+    json!((v * 1000.0).round() / 1000.0)
 }
 
 fn onoff(b: bool) -> Value {
     json!(if b { "ON" } else { "OFF" })
 }
 
-/// Sanitize a hardware id (`ble:AA:BB…`, `serial:/dev/ttyUSB0`) into an MQTT/
-/// object-id-safe slug.
+/// Sanitize a hardware id (`ble:AA:BB…`, `serial:/dev/ttyUSB0`) or free-form
+/// element id (`temp.t1`) into an MQTT/object-id-safe slug.
 pub fn slugify(id: &str) -> String {
     let mut out = String::with_capacity(id.len());
     let mut prev_us = false;
@@ -34,66 +39,68 @@ pub fn slugify(id: &str) -> String {
     out.trim_end_matches('_').to_string()
 }
 
+/// The two MOSFET switches get top-level state keys and dedicated entities;
+/// all other switches are prefixed `sw_`.
+fn switch_key(id: &str) -> String {
+    match id {
+        "charging" | "discharging" => id.to_string(),
+        other => format!("sw_{}", slugify(other)),
+    }
+}
+
 /// Flatten a [`BatteryStatus`] into a single-level JSON object used as the
 /// entity state document.
 pub fn flatten(s: &BatteryStatus) -> Value {
     let mut m = Map::new();
 
-    macro_rules! num {
-        ($k:expr, $v:expr) => {
-            if let Some(v) = $v {
-                m.insert($k.to_string(), r3(v));
-            }
-        };
+    // Every scalar sensor by slug ("soc", "voltage", "temp_t1", ...).
+    for sen in &s.sensors {
+        m.insert(slugify(&sen.id), r3(sen.value));
+    }
+    // Aggregate "temperature": first Celsius probe, for a stable primary entity.
+    if let Some(t) = s.sensors.iter().find(|x| x.unit == Unit::Celsius) {
+        m.insert("temperature".into(), r3(t.value));
     }
 
-    num!("soc", s.soc);
-    num!("soh", s.soh);
-    num!("voltage", s.voltage);
-    num!("current", s.current);
-    num!("power_in", s.power_in);
-    num!("power_out", s.power_out);
-    num!("time_remaining_h", s.time_remaining_h);
-    num!("capacity_remaining_ah", s.capacity_remaining_ah);
-    num!("capacity_full_ah", s.capacity_full_ah);
-    num!("charge_current_limit_a", s.charge_current_limit_a);
-    num!("discharge_current_limit_a", s.discharge_current_limit_a);
-    num!("soc_limit_max", s.soc_limit_max);
-    num!("soc_limit_min", s.soc_limit_min);
-    num!("temperature", s.temperature_c());
-    num!("cell_min", s.cell_min());
-    num!("cell_max", s.cell_max());
-    num!("cell_delta", s.cell_delta());
-
-    if let Some(c) = s.cycles {
-        m.insert("cycles".into(), json!(c));
-    }
-    if let Some(b) = s.charging {
-        m.insert("charging".into(), onoff(b));
-    }
-    if let Some(b) = s.discharging {
-        m.insert("discharging".into(), onoff(b));
-    }
-    for t in &s.temperatures {
-        m.insert(format!("temp_{}", slugify(&t.id)), r3(t.celsius));
-    }
     for sw in &s.switches {
-        m.insert(format!("sw_{}", slugify(&sw.id)), onoff(sw.on));
+        m.insert(switch_key(&sw.id), onoff(sw.on));
     }
+
     for p in &s.ports {
         let key = slugify(&p.id);
         if let Some(on) = p.on {
             m.insert(format!("port_{key}"), onoff(on));
         }
         if let Some(w) = p.watts {
-            m.insert(format!("port_{key}_w"), r3(w));
+            m.insert(format!("port_{key}_w"), r3(w as f64));
         }
     }
+
     for c in &s.cells {
         if let Some(v) = c.voltage {
-            m.insert(format!("cell_{}", c.index), r3(v));
+            m.insert(format!("cell_{}", c.index), r3(v as f64));
         }
     }
+    if let Some(v) = s.cell_min() {
+        m.insert("cell_min".into(), r3(v as f64));
+    }
+    if let Some(v) = s.cell_max() {
+        m.insert("cell_max".into(), r3(v as f64));
+    }
+    if let Some(v) = s.cell_delta() {
+        m.insert("cell_delta".into(), r3(v as f64));
+    }
+
+    for st in &s.settings {
+        let key = format!("set_{}", slugify(&st.id));
+        let v = match &st.value {
+            SettingValue::Bool(b) => onoff(*b),
+            SettingValue::Number(n) => r3(*n),
+            SettingValue::Text(t) => json!(t),
+        };
+        m.insert(key, v);
+    }
+
     m.insert(
         "alarms".into(),
         json!(if s.alarms.is_empty() { "none".to_string() } else { s.alarms.join(", ") }),
@@ -103,8 +110,27 @@ pub fn flatten(s: &BatteryStatus) -> Value {
     Value::Object(m)
 }
 
+/// Home Assistant metadata for the standard readings.
+/// `(id, name, device_class, unit, state_class)`
+const READINGS: &[(&str, &str, Option<&str>, Option<&str>, Option<&str>)] = &[
+    ("soc", "Battery", Some("battery"), Some("%"), Some("measurement")),
+    ("soh", "State of health", None, Some("%"), Some("measurement")),
+    ("voltage", "Voltage", Some("voltage"), Some("V"), Some("measurement")),
+    ("current", "Current", Some("current"), Some("A"), Some("measurement")),
+    ("power_in", "Power in", Some("power"), Some("W"), Some("measurement")),
+    ("power_out", "Power out", Some("power"), Some("W"), Some("measurement")),
+    ("time_remaining_h", "Time remaining", Some("duration"), Some("h"), Some("measurement")),
+    ("capacity_remaining_ah", "Capacity remaining", None, Some("Ah"), Some("measurement")),
+    ("capacity_full_ah", "Capacity full", None, Some("Ah"), Some("measurement")),
+    ("cycles", "Cycles", None, None, Some("total_increasing")),
+    ("charge_current_limit_a", "Charge current limit", Some("current"), Some("A"), Some("measurement")),
+    ("discharge_current_limit_a", "Discharge current limit", Some("current"), Some("A"), Some("measurement")),
+    ("soc_limit_max", "SOC limit max", None, Some("%"), Some("measurement")),
+    ("soc_limit_min", "SOC limit min", None, Some("%"), Some("measurement")),
+];
+
 /// Build all MQTT-discovery config payloads for one device, based on its
-/// capabilities and a first status snapshot (fields absent from the snapshot
+/// capabilities and a first status snapshot (elements absent from the snapshot
 /// get no entity).
 pub fn discovery_configs(
     prefix: &str,
@@ -186,76 +212,25 @@ pub fn discovery_configs(
         })
     };
 
-    // --- basic numeric sensors -------------------------------------------
-    let meas = Some("measurement");
-    if s.soc.is_some() {
-        add("sensor", "soc", sensor("Battery", "soc", Some("battery"), Some("%"), meas));
-    }
-    if s.soh.is_some() {
-        add("sensor", "soh", sensor("State of health", "soh", None, Some("%"), meas));
-    }
-    if s.voltage.is_some() {
-        add("sensor", "voltage", sensor("Voltage", "voltage", Some("voltage"), Some("V"), meas));
-    }
-    if s.current.is_some() {
-        add("sensor", "current", sensor("Current", "current", Some("current"), Some("A"), meas));
-    }
-    if s.power_in.is_some() {
-        add("sensor", "power_in", sensor("Power in", "power_in", Some("power"), Some("W"), meas));
-    }
-    if s.power_out.is_some() {
-        add("sensor", "power_out", sensor("Power out", "power_out", Some("power"), Some("W"), meas));
-    }
-    if s.time_remaining_h.is_some() {
-        add(
-            "sensor",
-            "time_remaining_h",
-            sensor("Time remaining", "time_remaining_h", Some("duration"), Some("h"), meas),
-        );
-    }
-    if s.capacity_remaining_ah.is_some() {
-        add(
-            "sensor",
-            "capacity_remaining_ah",
-            sensor("Capacity remaining", "capacity_remaining_ah", None, Some("Ah"), meas),
-        );
-    }
-    if s.capacity_full_ah.is_some() {
-        add(
-            "sensor",
-            "capacity_full_ah",
-            sensor("Capacity full", "capacity_full_ah", None, Some("Ah"), meas),
-        );
-    }
-    if s.cycles.is_some() {
-        add("sensor", "cycles", sensor("Cycles", "cycles", None, None, Some("total_increasing")));
-    }
-    if s.charge_current_limit_a.is_some() {
-        add(
-            "sensor",
-            "charge_current_limit_a",
-            sensor("Charge current limit", "charge_current_limit_a", Some("current"), Some("A"), meas),
-        );
-    }
-    if s.discharge_current_limit_a.is_some() {
-        add(
-            "sensor",
-            "discharge_current_limit_a",
-            sensor("Discharge current limit", "discharge_current_limit_a", Some("current"), Some("A"), meas),
-        );
+    // --- standard numeric sensors ------------------------------------------
+    for (id, name, dc, unit, sc) in READINGS {
+        if s.reading(id).is_some() {
+            add("sensor", id, sensor(name, id, *dc, *unit, *sc));
+        }
     }
 
     // --- temperatures ------------------------------------------------------
-    if s.temperature_c().is_some() {
+    let meas = Some("measurement");
+    if s.sensors.iter().any(|x| x.unit == Unit::Celsius) {
         add(
             "sensor",
             "temperature",
             sensor("Temperature", "temperature", Some("temperature"), Some("°C"), meas),
         );
     }
-    for t in &s.temperatures {
-        let key = format!("temp_{}", slugify(&t.id));
-        let name = t.label.clone().unwrap_or_else(|| format!("Temperature {}", t.id));
+    for t in s.sensors.iter().filter(|x| x.id.starts_with("temp.")) {
+        let key = slugify(&t.id);
+        let name = t.label.clone().unwrap_or_else(|| key.clone());
         let mut c = sensor(&name, &key, Some("temperature"), Some("°C"), meas);
         c.as_object_mut().unwrap().insert("enabled_by_default".into(), json!(false));
         add("sensor", &key.clone(), c);
@@ -279,43 +254,33 @@ pub fn discovery_configs(
     add("binary_sensor", "alarm_active", binary("Alarm", "alarm_active", Some("problem")));
     add("sensor", "alarms", sensor("Alarms", "alarms", None, None, None));
 
-    // --- charge / discharge MOSFETs ----------------------------------------
-    if s.charging.is_some() {
-        if caps.contains(Capabilities::TOGGLE_CHARGE) {
-            add("switch", "charging", switch("Charging", "charging", "charging"));
-        } else {
-            add(
-                "binary_sensor",
-                "charging",
-                binary("Charging", "charging", Some("battery_charging")),
-            );
-        }
-    }
-    if s.discharging.is_some() {
-        if caps.contains(Capabilities::TOGGLE_DISCHARGE) {
-            add("switch", "discharging", switch("Discharging", "discharging", "discharging"));
-        } else {
-            add("binary_sensor", "discharging", binary("Discharging", "discharging", None));
-        }
-    }
-
-    // --- free-form device switches (heater, balancer, precharge, ...) ------
+    // --- switches -----------------------------------------------------------
     for sw in &s.switches {
-        let key = format!("sw_{}", slugify(&sw.id));
+        let key = switch_key(&sw.id);
         let name = sw.label.clone().unwrap_or_else(|| sw.id.clone());
-        if caps.is_controllable() {
+        let togglable = match sw.id.as_str() {
+            "charging" => caps.contains(Capabilities::TOGGLE_CHARGE),
+            "discharging" => caps.contains(Capabilities::TOGGLE_DISCHARGE),
+            "balancer" => caps.contains(Capabilities::TOGGLE_BALANCER),
+            _ => caps.is_controllable(),
+        };
+        let dc = match sw.id.as_str() {
+            "charging" => Some("battery_charging"),
+            _ => None,
+        };
+        if togglable {
             add("switch", &key.clone(), switch(&name, &key, &sw.id));
         } else {
-            add("binary_sensor", &key.clone(), binary(&name, &key, None));
+            add("binary_sensor", &key.clone(), binary(&name, &key, dc));
         }
     }
 
-    // --- station ports ------------------------------------------------------
+    // --- station ports (controllability is per-port) -------------------------
     for p in &s.ports {
         let key = slugify(&p.id);
         let name = p.label.clone().unwrap_or_else(|| p.id.clone());
         if p.on.is_some() {
-            if caps.contains(Capabilities::TOGGLE_PORTS) {
+            if p.settable {
                 add("switch", &format!("port_{key}"), switch(&name, &format!("port_{key}"), &p.id));
             } else {
                 add(
@@ -332,6 +297,41 @@ pub fn discovery_configs(
                 sensor(&format!("{name} power"), &format!("port_{key}_w"), Some("power"), Some("W"), meas),
             );
         }
+    }
+
+    // --- device settings (config category, disabled by default) -------------
+    let can_write = caps.contains(Capabilities::WRITE_SETTINGS);
+    for st in &s.settings {
+        let key = format!("set_{}", slugify(&st.id));
+        let name = st.label.clone().unwrap_or_else(|| st.id.clone());
+        let mut cfg = match (&st.kind, st.writable && can_write) {
+            (SettingKind::Bool, true) => ("switch", switch(&name, &key, &st.id)),
+            (SettingKind::Bool, false) => ("binary_sensor", binary(&name, &key, None)),
+            (SettingKind::Number { min, max, step, unit }, true) => (
+                "number",
+                json!({
+                    "name": name,
+                    "command_topic": format!("{base}/{slug}/setv/{}", st.id),
+                    "value_template": format!("{{{{ value_json.{key} }}}}"),
+                    "min": min.unwrap_or(0.0),
+                    "max": max.unwrap_or(10_000.0),
+                    "step": step.unwrap_or(0.001),
+                    "unit_of_measurement": unit.map(|u| u.symbol()).unwrap_or(""),
+                    "mode": "box",
+                }),
+            ),
+            (SettingKind::Number { unit, .. }, false) => (
+                "sensor",
+                sensor(&name, &key, None, unit.map(|u| u.symbol()), None),
+            ),
+            // Enum/Text: read-only representation for now.
+            (_, _) => ("sensor", sensor(&name, &key, None, None, None)),
+        };
+        let (component, payload) = (&mut cfg.0, &mut cfg.1);
+        let o = payload.as_object_mut().unwrap();
+        o.insert("entity_category".into(), json!("config"));
+        o.insert("enabled_by_default".into(), json!(false));
+        add(component, &key.clone(), payload.clone());
     }
 
     // --- charge limit number ------------------------------------------------
@@ -359,18 +359,26 @@ pub fn discovery_configs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use battery_control::{Reading, SwitchId};
+
+    fn status(soc: Option<f64>, charging: Option<bool>) -> BatteryStatus {
+        let mut s = BatteryStatus::default();
+        s.set(Reading::Soc, soc);
+        s.set_switch(SwitchId::Charging, charging);
+        s
+    }
 
     #[test]
     fn slugs() {
         assert_eq!(slugify("ble:AA:BB:CC"), "ble_aa_bb_cc");
         assert_eq!(slugify("serial:/dev/ttyUSB0"), "serial_dev_ttyusb0");
         assert_eq!(slugify("usb_c1"), "usb_c1");
+        assert_eq!(slugify("temp.t1"), "temp_t1");
     }
 
     #[test]
     fn flatten_basics() {
-        let s = BatteryStatus { soc: Some(87.129), charging: Some(true), ..Default::default() };
-        let v = flatten(&s);
+        let v = flatten(&status(Some(87.129), Some(true)));
         assert_eq!(v["soc"], 87.129);
         assert_eq!(v["charging"], "ON");
         assert_eq!(v["alarms"], "none");
@@ -379,7 +387,6 @@ mod tests {
 
     #[test]
     fn configs_gate_on_snapshot_and_caps() {
-        let s = BatteryStatus { soc: Some(50.0), charging: Some(true), ..Default::default() };
         let cfgs = discovery_configs(
             "homeassistant",
             "battery_control",
@@ -387,11 +394,43 @@ mod tests {
             "Test",
             &DeviceInfo::default(),
             Capabilities::READ_BASIC,
-            &s,
+            &status(Some(50.0), Some(true)),
         );
         // soc sensor exists, voltage doesn't; charging is a binary_sensor (no TOGGLE_CHARGE).
         assert!(cfgs.iter().any(|(t, _)| t.contains("/sensor/bc_ble_aa/soc/")));
         assert!(!cfgs.iter().any(|(t, _)| t.contains("/voltage/")));
         assert!(cfgs.iter().any(|(t, _)| t.contains("/binary_sensor/bc_ble_aa/charging/")));
+    }
+
+    #[test]
+    fn settings_become_config_entities() {
+        use battery_control::{Setting, SettingKind, SettingValue, Unit};
+        let mut s = status(Some(50.0), None);
+        s.settings.push(Setting {
+            id: "cell_ovp".into(),
+            label: Some("Cell OVP".into()),
+            value: SettingValue::Number(3.55),
+            kind: SettingKind::Number { min: None, max: None, step: None, unit: Some(Unit::Volt) },
+            writable: true,
+        });
+        let v = flatten(&s);
+        assert_eq!(v["set_cell_ovp"], 3.55);
+
+        let cfgs = discovery_configs(
+            "homeassistant",
+            "battery_control",
+            "ble_aa",
+            "Test",
+            &DeviceInfo::default(),
+            Capabilities::WRITE_SETTINGS,
+            &s,
+        );
+        let (topic, cfg) = cfgs
+            .iter()
+            .find(|(t, _)| t.contains("/set_cell_ovp/"))
+            .expect("setting entity");
+        assert!(topic.starts_with("homeassistant/number/"));
+        assert_eq!(cfg["command_topic"], "battery_control/ble_aa/setv/cell_ovp");
+        assert_eq!(cfg["entity_category"], "config");
     }
 }
