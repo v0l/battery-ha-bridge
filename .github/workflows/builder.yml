@@ -52,10 +52,9 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: battery_bridge
+          context: .
+          file: battery_bridge/Dockerfile
           platforms: ${{ matrix.platform }}
-          build-args: |
-            BRIDGE_REF=${{ github.sha }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             io.hass.name=Battery Control Bridge
