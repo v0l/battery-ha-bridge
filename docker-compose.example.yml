@@ -21,6 +21,10 @@ services:
     restart: unless-stopped
     # host networking: reach a local broker + SocketCAN interfaces
     network_mode: host
+    # Custom AppArmor profile: docker-default + D-Bus access for BlueZ.
+    # Load it first on the host:  sudo apparmor_parser -r -W apparmor/battery-bridge
+    security_opt:
+      - apparmor:battery-bridge
     volumes:
       # BLE via the host's BlueZ daemon (Anker / JK / Victron)
       - /var/run/dbus:/var/run/dbus:ro

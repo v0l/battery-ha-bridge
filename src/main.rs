@@ -12,8 +12,9 @@ use log::{error, info, warn};
 use rumqttc::{AsyncClient, Event, Incoming, LastWill, MqttOptions, QoS};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "battery-ha-bridge", version, about)]
@@ -36,6 +37,9 @@ struct Args {
     /// BLE scan duration in seconds.
     #[arg(long, env = "BLE_SECS", default_value_t = 6)]
     ble_secs: u64,
+    /// Seconds between background rediscovery scans.
+    #[arg(long, env = "RESCAN_SECS", default_value_t = 30)]
+    rescan_secs: u64,
     /// Home Assistant MQTT discovery prefix.
     #[arg(long, env = "DISCOVERY_PREFIX", default_value = "homeassistant")]
     discovery_prefix: String,
@@ -56,45 +60,7 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    // --- discover & connect devices --------------------------------------
-    let opts = DiscoverOptions { ble_secs: args.ble_secs, ..Default::default() };
-    info!("discovering batteries ({}s BLE scan + serial probe)...", opts.ble_secs);
-    let found = discover(&opts).await?;
-    for d in &found {
-        info!("found {} [{}] ({})", d.label, d.id, d.backend);
-    }
-
-    let selected: Vec<_> = if args.devices.is_empty() {
-        found.iter().collect()
-    } else {
-        let mut sel = Vec::new();
-        for q in &args.devices {
-            match resolve(&found, q) {
-                Ok(d) => sel.push(d),
-                Err(e) => warn!("device query '{q}': {e}"),
-            }
-        }
-        sel
-    };
-    if selected.is_empty() {
-        return Err("no batteries matched/discovered".into());
-    }
-
-    let mut devices: Vec<(String, String, Box<dyn Battery>)> = Vec::new();
-    for d in selected {
-        match d.connect(args.ble_secs).await {
-            Ok(b) => {
-                info!("connected {} [{}]", d.label, d.id);
-                devices.push((hass::slugify(&d.id), d.label.clone(), b));
-            }
-            Err(e) => warn!("connect {} [{}] failed: {e}", d.label, d.id),
-        }
-    }
-    if devices.is_empty() {
-        return Err("no batteries connected".into());
-    }
-
-    // --- MQTT ---------------------------------------------------------------
+    // --- MQTT (connect first; devices come and go independently) ------------
     let bridge_avail_t = format!("{}/bridge/availability", args.base_topic);
     let mut mq = MqttOptions::new("battery-ha-bridge", &args.mqtt_host, args.mqtt_port);
     mq.set_keep_alive(Duration::from_secs(30));
@@ -109,22 +75,18 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     client.subscribe(format!("{}/status", args.discovery_prefix), QoS::AtLeastOnce).await?;
     client.publish(&bridge_avail_t, QoS::AtLeastOnce, true, "online").await?;
 
-    // --- per-device tasks -----------------------------------------------
+    // Shared registry of connected devices, keyed by slug.
     let (republish_tx, _) = broadcast::channel::<()>(4);
-    let mut routes: HashMap<String, mpsc::Sender<Command>> = HashMap::new();
-    for (slug, label, bat) in devices {
-        let (tx, rx) = mpsc::channel::<Command>(16);
-        routes.insert(slug.clone(), tx);
-        tokio::spawn(run_device(
-            bat,
-            slug,
-            label,
-            client.clone(),
-            args.clone(),
-            rx,
-            republish_tx.subscribe(),
-        ));
-    }
+    let routes: Arc<Mutex<HashMap<String, mpsc::Sender<Command>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    // --- background discovery supervisor: scans forever, auto-connects new --
+    tokio::spawn(discovery_loop(
+        args.clone(),
+        client.clone(),
+        routes.clone(),
+        republish_tx.clone(),
+    ));
 
     // --- MQTT event loop: route commands, handle HA restarts ----------------
     loop {
@@ -140,7 +102,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 if let Some((slug, cmd)) = parse_command(&args.base_topic, &topic, &payload) {
-                    match routes.get(&slug) {
+                    let tx = routes.lock().await.get(&slug).cloned();
+                    match tx {
                         Some(tx) => {
                             if tx.send(cmd).await.is_err() {
                                 warn!("device task for '{slug}' is gone");
@@ -156,6 +119,71 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
+    }
+}
+
+/// Periodically scan for batteries and spawn a task for each newly seen one.
+/// Never exits: with no devices in range it simply keeps scanning.
+async fn discovery_loop(
+    args: Args,
+    client: AsyncClient,
+    routes: Arc<Mutex<HashMap<String, mpsc::Sender<Command>>>>,
+    republish_tx: broadcast::Sender<()>,
+) {
+    let opts = DiscoverOptions { ble_secs: args.ble_secs, ..Default::default() };
+    loop {
+        info!("scanning for batteries ({}s BLE scan + serial probe)...", opts.ble_secs);
+        match discover(&opts).await {
+            Ok(found) => {
+                let selected: Vec<_> = if args.devices.is_empty() {
+                    found.iter().collect()
+                } else {
+                    let mut sel = Vec::new();
+                    for q in &args.devices {
+                        match resolve(&found, q) {
+                            Ok(d) => sel.push(d),
+                            Err(e) => warn!("device query '{q}': {e}"),
+                        }
+                    }
+                    sel
+                };
+
+                for d in selected {
+                    let slug = hass::slugify(&d.id);
+                    // Already connected/tracked? skip.
+                    if routes.lock().await.contains_key(&slug) {
+                        continue;
+                    }
+                    info!("found {} [{}] ({}); connecting", d.label, d.id, d.backend);
+                    match d.connect(args.ble_secs).await {
+                        Ok(bat) => {
+                            info!("connected {} [{}]", d.label, d.id);
+                            let (tx, rx) = mpsc::channel::<Command>(16);
+                            routes.lock().await.insert(slug.clone(), tx);
+                            let routes = routes.clone();
+                            let client = client.clone();
+                            let args = args.clone();
+                            let label = d.label.clone();
+                            let republish = republish_tx.subscribe();
+                            let task_slug = slug.clone();
+                            tokio::spawn(async move {
+                                run_device(
+                                    bat, task_slug.clone(), label, client, args, rx, republish,
+                                )
+                                .await;
+                                // Task ended (disconnect/fatal): drop from registry so
+                                // the next scan can rediscover and reconnect it.
+                                routes.lock().await.remove(&task_slug);
+                                info!("[{task_slug}] device task ended; will retry on next scan");
+                            });
+                        }
+                        Err(e) => warn!("connect {} [{}] failed: {e}", d.label, d.id),
+                    }
+                }
+            }
+            Err(e) => warn!("discovery failed: {e}"),
+        }
+        tokio::time::sleep(Duration::from_secs(args.rescan_secs.max(1))).await;
     }
 }
 
@@ -185,15 +213,24 @@ async fn run_device(
     let avail_t = format!("{}/{}/availability", args.base_topic, slug);
     let state_t = format!("{}/{}/state", args.base_topic, slug);
 
-    // First snapshot drives entity discovery.
-    let first = loop {
+    // First snapshot drives entity discovery. Give up after a few tries so the
+    // supervisor can rediscover/reconnect instead of us blocking forever.
+    let mut first = None;
+    for attempt in 1..=3u32 {
         match bat.status().await {
-            Ok(s) => break s,
+            Ok(s) => {
+                first = Some(s);
+                break;
+            }
             Err(e) => {
-                warn!("[{slug}] initial status failed: {e}; retrying in 10s");
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                warn!("[{slug}] initial status failed ({attempt}/3): {e}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
+    }
+    let Some(first) = first else {
+        warn!("[{slug}] could not read initial status; giving up");
+        return;
     };
 
     let configs = hass::discovery_configs(
@@ -234,6 +271,13 @@ async fn run_device(
                         if failures >= 3 && online {
                             publish(&client, &avail_t, "offline", true).await;
                             online = false;
+                        }
+                        // Prolonged failure: assume the device is gone and exit so
+                        // the discovery loop can reconnect it when it reappears.
+                        if failures >= 10 {
+                            warn!("[{slug}] too many failures; disconnecting");
+                            publish(&client, &avail_t, "offline", true).await;
+                            return;
                         }
                     }
                 }
