@@ -8,7 +8,7 @@ url: https://github.com/v0l/battery-ha-bridge
 arch:
   - amd64
   - aarch64
-image: ghcr.io/v0l/battery-bridge-{arch}
+image: ghcr.io/v0l/battery-bridge
 init: false
 # Auto-wire the Mosquitto broker add-on.
 services:

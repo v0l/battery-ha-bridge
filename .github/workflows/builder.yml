@@ -8,6 +8,9 @@ on:
       - .github/workflows/builder.yml
   workflow_dispatch:
 
+env:
+  IMAGE: ghcr.io/v0l/battery-bridge
+
 jobs:
   build:
     name: Build ${{ matrix.arch }}
@@ -42,15 +45,13 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: battery_bridge
           platforms: ${{ matrix.platform }}
-          push: true
-          tags: |
-            ghcr.io/v0l/battery-bridge-${{ matrix.arch }}:${{ steps.ver.outputs.version }}
-            ghcr.io/v0l/battery-bridge-${{ matrix.arch }}:latest
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             io.hass.name=Battery Control Bridge
             io.hass.description=Expose batteries to Home Assistant via MQTT Discovery
@@ -59,3 +60,60 @@ jobs:
             io.hass.version=${{ steps.ver.outputs.version }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge multi-arch manifest
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read add-on version
+        id: ver
+        run: echo "version=$(yq -r .version battery_bridge/config.yaml)" >> "$GITHUB_OUTPUT"
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t "$IMAGE:${{ steps.ver.outputs.version }}" \
+            -t "$IMAGE:latest" \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      - name: Inspect
+        run: docker buildx imagetools inspect "$IMAGE:${{ steps.ver.outputs.version }}"
