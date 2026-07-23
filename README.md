@@ -44,12 +44,7 @@ cd battery-ha-bridge
 cargo run --release -- --mqtt-host 192.168.1.10 --device c1000
 ```
 
-To develop against a local checkout of the lib, add to `Cargo.toml`:
-
-```toml
-[patch."https://github.com/v0l/battery-control"]
-battery_control = { path = "../battery-control" }
-```
+To pick up new upstream lib changes, run `cargo update -p battery_control`.
 
 Empty `--device` bridges everything discovered. On Linux, add
 `--features can` for Pylontech over SocketCAN. All flags are also settable via
