@@ -1,25 +1,33 @@
-#!/usr/bin/with-contenv bashio
-set -e
+#!/bin/sh
+# Home Assistant add-on entrypoint: no bashio, just options.json + Supervisor API.
+set -eu
 
-# MQTT credentials from the Mosquitto add-on service.
-if bashio::services.available mqtt; then
-    export MQTT_HOST="$(bashio::services mqtt 'host')"
-    export MQTT_PORT="$(bashio::services mqtt 'port')"
-    export MQTT_USERNAME="$(bashio::services mqtt 'username')"
-    export MQTT_PASSWORD="$(bashio::services mqtt 'password')"
-else
-    bashio::log.warning "No MQTT service found; falling back to defaults/env"
+OPTS=/data/options.json
+
+# MQTT credentials from the Mosquitto add-on via the Supervisor services API.
+if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+    if MQTT_JSON=$(curl -sf -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+            http://supervisor/services/mqtt); then
+        MQTT_HOST=$(echo "$MQTT_JSON" | jq -r '.data.host')
+        MQTT_PORT=$(echo "$MQTT_JSON" | jq -r '.data.port')
+        MQTT_USERNAME=$(echo "$MQTT_JSON" | jq -r '.data.username')
+        MQTT_PASSWORD=$(echo "$MQTT_JSON" | jq -r '.data.password')
+        export MQTT_HOST MQTT_PORT MQTT_USERNAME MQTT_PASSWORD
+    else
+        echo "WARNING: no MQTT service from Supervisor; using defaults/env" >&2
+    fi
 fi
 
-export POLL_INTERVAL="$(bashio::config 'poll_interval')"
-export BLE_SECS="$(bashio::config 'ble_secs')"
-export RUST_LOG="$(bashio::config 'log_level')"
-
-# Comma-join the devices list (empty = bridge everything discovered).
-DEVICES="$(bashio::config 'devices' | paste -sd, -)"
-if [ -n "$DEVICES" ] && [ "$DEVICES" != "null" ]; then
-    export DEVICES
+if [ -f "$OPTS" ]; then
+    POLL_INTERVAL=$(jq -r '.poll_interval // 15' "$OPTS")
+    BLE_SECS=$(jq -r '.ble_secs // 6' "$OPTS")
+    RUST_LOG=$(jq -r '.log_level // "info"' "$OPTS")
+    export POLL_INTERVAL BLE_SECS RUST_LOG
+    DEVICES=$(jq -r '.devices // [] | join(",")' "$OPTS")
+    if [ -n "$DEVICES" ]; then
+        export DEVICES
+    fi
 fi
 
-bashio::log.info "Starting battery-ha-bridge (mqtt=${MQTT_HOST}:${MQTT_PORT})"
+echo "Starting battery-ha-bridge (mqtt=${MQTT_HOST:-core-mosquitto}:${MQTT_PORT:-1883})"
 exec /usr/local/bin/battery-ha-bridge

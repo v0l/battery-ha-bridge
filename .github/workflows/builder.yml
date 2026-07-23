@@ -49,8 +49,6 @@ jobs:
           context: battery_bridge
           platforms: ${{ matrix.platform }}
           push: true
-          build-args: |
-            BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base:3.21
           tags: |
             ghcr.io/v0l/battery-bridge-${{ matrix.arch }}:${{ steps.ver.outputs.version }}
             ghcr.io/v0l/battery-bridge-${{ matrix.arch }}:latest
