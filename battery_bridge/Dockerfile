@@ -7,11 +7,13 @@ RUN apk add --no-cache git musl-dev dbus-dev pkgconf
 ENV RUSTFLAGS="-C target-feature=-crt-static"
 
 # The add-on build context contains only this directory, so clone the crate;
-# pin with BRIDGE_REF for reproducible builds. battery_control comes via a
-# cargo git dependency pinned in Cargo.lock.
+# BRIDGE_REF (a branch, tag, or commit SHA) both pins the build for
+# reproducibility AND busts Docker's layer cache when the code changes --
+# without it the `git clone` layer is reused and stale code ships.
+# battery_control comes via a cargo git dependency pinned in Cargo.lock.
 ARG BRIDGE_REF=main
-RUN git clone --depth 1 --branch "$BRIDGE_REF" \
-        https://github.com/v0l/battery-ha-bridge /build
+RUN git clone https://github.com/v0l/battery-ha-bridge /build \
+    && cd /build && git checkout "$BRIDGE_REF"
 WORKDIR /build
 # `can` enables the Linux-only Pylontech SocketCAN transport.
 RUN cargo build --release --locked --features can \

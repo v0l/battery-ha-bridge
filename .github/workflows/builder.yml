@@ -54,6 +54,8 @@ jobs:
         with:
           context: battery_bridge
           platforms: ${{ matrix.platform }}
+          build-args: |
+            BRIDGE_REF=${{ github.sha }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             io.hass.name=Battery Control Bridge
